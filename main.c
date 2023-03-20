@@ -37,7 +37,7 @@ inline uint16_t max(int16_t a, int16_t b) {
 	return (a > b) ? a : b;
 }
 
-#define START_CNT 9
+#define START_CNT 12
 
 typedef struct {
 	uint16_t data[START_CNT];
@@ -45,7 +45,6 @@ typedef struct {
 	uint8_t written;
 	uint8_t index;
 	uint8_t success;
-	uint16_t extra_data[START_CNT];
 	uint16_t accepted_minval;
 	uint16_t accepted_maxval;
 	uint8_t acceptedCnt;
@@ -63,7 +62,7 @@ ISR(INT5_vect) {
 	if(state.success == 1) {
 		uint16_t timer = TCNT1;
 		TCNT1 = 0;
-		if(timer > 12000) {
+		if(timer > 11000) {
 			state.lastBit ^= 1;
 		}
 		uint8_t newb = (state.finalBytes[state.bytesWritten] << 1) + state.lastBit;
@@ -73,7 +72,7 @@ ISR(INT5_vect) {
 			state.bytesWritten++;
 			state.bitsInCurrent = 8;
 		}
-		if(state.bitsLeft == 0) { cli(); state.success = 2; }
+		if(state.bitsLeft == 0) { state.success = 2; }
 		return;
 	} else {
 		state.data[state.index] = TCNT1;
@@ -81,21 +80,18 @@ ISR(INT5_vect) {
 		state.index = (state.index + 1) % START_CNT;
 		if(state.written < START_CNT) state.written++;
 		if(state.written == START_CNT) {
-			uint16_t minVal = state.data[0];
+			uint8_t prevIndex = state.index;
+			uint16_t minVal = state.data[(prevIndex ? 0 : 1)];
 			uint16_t maxVal = minVal;
-			for(uint8_t i = 1; i < START_CNT; i++) {
+			for(uint8_t i = 0; i < START_CNT; i++) {
+				if(i == prevIndex)
+					continue;
 				uint16_t curr = state.data[i];
 				minVal = min(minVal, curr);	
 				maxVal = max(maxVal, curr);
 			}
-			if((maxVal - minVal) < 50) {
-				state.index = 0;
-				state.written = 0;
-				if(state.acceptedCnt++ >= 10) {
-					state.success = 1;
-					state.accepted_minval = minVal;
-					state.accepted_maxval = maxVal;
-				}
+			if((maxVal - minVal) < 50 && state.data[prevIndex] > 10000) {
+				state.success = 1;
 			}
 		}
 	}
@@ -141,7 +137,7 @@ int main() {
 	OCR0B = 64;
 	DDRG |= (1 << PB5);
 	DDRE &= ~(1 << PE5);
-	EICRB |= (1 << ISC51);
+	EICRB |= (1 << ISC51) | (1 << ISC50);
 	EIMSK |= (1 << INT5);
 
 	uart_init();
@@ -166,9 +162,11 @@ int main() {
 
 		cli();
 		uart_putstring("Start timings:\r\n");
+		uart_putint(state.index);
+		uart_putstring("\r\n");
 		for(uint8_t i = 0; i < START_CNT; i++) {
 			uart_putint(state.data[i]);
-			if(i < 8)
+			if(i < START_CNT - 1)
 				uart_putstring(", ");
 		}
 		uart_putstring("\r\n");
