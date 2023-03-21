@@ -3,7 +3,7 @@
 #include <avr/interrupt.h>
 #include <util/delay.h>
 
-#define BAUD 9600
+#define BAUD 1000000 
 
 #ifndef F_CPU
 #error "No F_CPU definition"
@@ -15,86 +15,19 @@ void uart_init() {
 	UBRR0L = UBRRL_VALUE;
 
 #if USE_2X
+#warning "Using 2x"
 	UCSR0A |= _BV(U2X0);
 #else
 	UCSR0A &= ~(_BV(U2X0));
 #endif
 
+    UCSR0B = _BV(TXEN0);
 	UCSR0C = _BV(UCSZ01) | _BV(UCSZ00);
-    UCSR0B = _BV(RXEN0) | _BV(TXEN0);
 }
 
 void uart_putchar(char c) {
    loop_until_bit_is_set(UCSR0A, UDRE0);
    UDR0 = c;
-}
-
-inline uint16_t min(int16_t a, int16_t b) {
-	return (a < b) ? a : b;
-}
-
-inline uint16_t max(int16_t a, int16_t b) {
-	return (a > b) ? a : b;
-}
-
-#define START_CNT 12
-
-typedef struct {
-	uint16_t data[START_CNT];
-	uint16_t timers[64];
-	uint8_t written;
-	uint8_t index;
-	uint8_t success;
-	uint16_t accepted_minval;
-	uint16_t accepted_maxval;
-	uint8_t acceptedCnt;
-	uint8_t lastBit;
-	uint8_t finalBytes[8];
-	uint8_t bitsLeft;
-	uint8_t bitsInCurrent;
-	uint8_t bytesWritten;
-} state_t;
-
-volatile state_t state;
-
-ISR(INT5_vect) {
-	if(state.success == 2) return;
-	if(state.success == 1) {
-		uint16_t timer = TCNT1;
-		TCNT1 = 0;
-		if(timer > 11000) {
-			state.lastBit ^= 1;
-		}
-		uint8_t newb = (state.finalBytes[state.bytesWritten] << 1) + state.lastBit;
-		state.finalBytes[state.bytesWritten] = newb;
-		state.timers[64 - 9 - state.bitsLeft--] = timer;
-		if(--state.bitsInCurrent == 0) {
-			state.bytesWritten++;
-			state.bitsInCurrent = 8;
-		}
-		if(state.bitsLeft == 0) { state.success = 2; }
-		return;
-	} else {
-		state.data[state.index] = TCNT1;
-		TCNT1 = 0;
-		state.index = (state.index + 1) % START_CNT;
-		if(state.written < START_CNT) state.written++;
-		if(state.written == START_CNT) {
-			uint8_t prevIndex = state.index;
-			uint16_t minVal = state.data[(prevIndex ? 0 : 1)];
-			uint16_t maxVal = minVal;
-			for(uint8_t i = 0; i < START_CNT; i++) {
-				if(i == prevIndex)
-					continue;
-				uint16_t curr = state.data[i];
-				minVal = min(minVal, curr);	
-				maxVal = max(maxVal, curr);
-			}
-			if((maxVal - minVal) < 50 && state.data[prevIndex] > 10000) {
-				state.success = 1;
-			}
-		}
-	}
 }
 
 void uart_putint(uint16_t x) {
@@ -124,65 +57,63 @@ char convbyte(uint8_t x) {
 void uart_puthexbyte(uint8_t x) {
 	uart_putchar(convbyte((x >> 4) & 0xf));
 	uart_putchar(convbyte(x & 0xf));
-		
+}
+
+volatile uint8_t outByte;
+volatile uint8_t bitsWritten;
+volatile uint8_t error;
+volatile uint8_t inint;
+ISR(TIMER1_COMPA_vect, ISR_NOBLOCK) { // timer interrupt
+	if(inint)
+		error = 2;
+	
+	if(error)
+		return;
+
+	inint = 1;
+	uint8_t newb, bw = bitsWritten;
+	newb = (outByte << 1) | ((PINE >> PE5) & 1);
+	if(++bw == 8) {
+		bw = 0;
+		if(!(UCSR0A & (1 << UDRE0))) {
+			error = 1;
+			inint = 0;
+			return;
+		}
+		UDR0 = newb;
+	}
+	outByte = newb;
+	bitsWritten = bw;
+	inint = 0;
 }
 
 int main() {
+	outByte = 0;
+	bitsWritten = 0;
+	error = 0;
+	inint = 0;
+
 	TCCR0A = 0b00010010;
 	TCCR0B = 0b00000001;
-
-	TCCR1A = 0;
-	TCCR1B = 1;
 	OCR0A = 64;
 	OCR0B = 64;
+
+	TCCR1A = 0;
+	TCCR1B = 0b1001;
+	OCR1A = 200;
+	TIMSK1 = 0b10;
 	DDRG |= (1 << PB5);
 	DDRE &= ~(1 << PE5);
-	EICRB |= (1 << ISC51) | (1 << ISC50);
-	EIMSK |= (1 << INT5);
 
 	uart_init();
+	uart_putstring("Starting\r\n");
+	_delay_ms(4000);
+	sei();
 	while(1) {
-		state.written = 0;
-		state.index = 0;
-		state.success = 0;
-		state.acceptedCnt = 0;
-		state.lastBit = 1;
-		state.bitsLeft = 64 - 9;
-		state.bytesWritten = 1;
-		state.bitsInCurrent = 7;
-		
-		state.finalBytes[0] = 0xff;
-		state.finalBytes[1] = 0x1;
-		for(int i = 2; i < 8; i++) {
-			state.finalBytes[i] = 0;
+		if(error) {
+			uart_putstring("Failed! ");
+			uart_puthexbyte(error);
+			uart_putstring("\r\n");
 		}
-		sei();
-		while(state.success != 2)
-			;
-
-		cli();
-		uart_putstring("Start timings:\r\n");
-		uart_putint(state.index);
-		uart_putstring("\r\n");
-		for(uint8_t i = 0; i < START_CNT; i++) {
-			uart_putint(state.data[i]);
-			if(i < START_CNT - 1)
-				uart_putstring(", ");
-		}
-		uart_putstring("\r\n");
-		uart_putstring("Final data:\r\n");
-		for(uint8_t i = 0; i < 8; i++) {
-			uart_putstring("0x");
-			uart_puthexbyte(state.finalBytes[i]);
-			if(i < 7)
-				uart_putstring(", ");
-		}
-		uart_putstring("\r\n");
-		for(uint8_t i = 0; i < 64 - 9; i++) {
-			uart_putint(state.timers[i]);
-			uart_putstring(", ");
-		}
-		uart_putstring("\r\n");
-		_delay_ms(100);
 	}
 }
