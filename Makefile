@@ -5,7 +5,7 @@ HEXFILE = main.hex
 CC = avr-gcc
 MMCU = atmega2560 
 FREQ = 16000000UL
-FLAGS = -O3 -Wall
+FLAGS = -Os -Wall
 
 all: $(HEXFILE)
 
